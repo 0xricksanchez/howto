@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::error::Error;
 
+const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_TEMP: &str = "0.5";
+const DEFAULT_MAX_TOKENS: &str = "2048";
+const DEFAULT_STREAM: &str = "true";
+const DEFAULT_MODEL: &str = "gpt-3.5-turbo";
+
 #[derive(Serialize, Deserialize, Debug)]
 struct Prompt {
     model: String,
@@ -13,16 +19,14 @@ struct Prompt {
     max_tokens: Option<u64>,
 }
 
-const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
-
 impl Prompt {
     fn new(model: String, messages: Vec<Message>) -> Self {
         Self {
             model,
             messages,
-            temperature: None,
-            stream: None,
-            max_tokens: None,
+            temperature: Some(DEFAULT_TEMP.parse::<f64>().unwrap()),
+            stream: Some(DEFAULT_STREAM.parse::<bool>().unwrap()),
+            max_tokens: Some(DEFAULT_MAX_TOKENS.parse::<u64>().unwrap()),
         }
     }
 
@@ -41,71 +45,85 @@ impl Prompt {
         self
     }
 
-    fn _get_client(&mut self) -> Client {
-        Client::new()
-    }
-
-    async fn run(&mut self) -> Result<(), Box<dyn Error>> {
-        let api_key = env::var("OPENAI_API_KEY")?;
-        if self.stream.unwrap_or(false) {
-            self._stream_openai(&api_key).await?;
-        } else {
-            self._prompt_openai(&api_key).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn _stream_openai(&mut self, api_key: &str) -> Result<(), Box<dyn Error>> {
-        let client = self._get_client();
-        let mut res = client
-            .post(OPENAI_API_URL)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&self)
-            .send()
-            .await?;
-
-        while let Some(chunk) = res.chunk().await? {
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            let lines: Vec<&str> = chunk_str.split('\n').collect();
-            for line in lines {
-                if let Some(chunk) = line.strip_prefix("data: ") {
-                    let serde_chunk: Result<StreamedReponse, _> = serde_json::from_str(chunk);
-                    match serde_chunk {
-                        Ok(chunk) => {
-                            for choice in chunk.choices {
-                                if let Some(content) = choice.delta.content {
-                                    print!(
-                                        "{}",
-                                        content.trim().strip_suffix('\n').unwrap_or(&content)
-                                    );
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn _prompt_openai(&mut self, api_key: &str) -> Result<(), Box<dyn Error>> {
-        let client = self._get_client();
+    async fn _make_request(
+        &mut self,
+        api_key: &str,
+    ) -> Result<reqwest::Response, Box<dyn Error + Send + Sync>> {
+        let client = Self::_get_client();
         let res = client
             .post(OPENAI_API_URL)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&self)
             .send()
+            .await?;
+
+        Ok(res)
+    }
+
+    fn _get_client() -> Client {
+        Client::new()
+    }
+
+    async fn run(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let api_key = env::var("OPENAI_API_KEY")?;
+        if self.stream.unwrap_or(false) {
+            self._ask_openai_streamed(&api_key).await?;
+        } else {
+            self._ask_openai(&api_key).await?;
+        }
+
+        Ok(())
+    }
+
+    fn _process_delta(&self, line: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        line.strip_prefix("data: ").map_or(Ok(()), |chunk| {
+            let serde_chunk: Result<StreamedReponse, _> = serde_json::from_str(chunk);
+            match serde_chunk {
+                Ok(chunk) => {
+                    for choice in chunk.choices {
+                        if let Some(content) = choice.delta.content {
+                            print!("{}", content.trim().strip_suffix('\n').unwrap_or(&content));
+                        }
+                    }
+                    Ok(())
+                }
+                Err(_) => Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Deserialization Error",
+                ))),
+            }
+        })
+    }
+
+    async fn _ask_openai_streamed(
+        &mut self,
+        api_key: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut res = self._make_request(api_key).await?;
+
+        loop {
+            let chunk = match res.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(e) => return Err(Box::new(e)),
+            };
+            let chunk_str = String::from_utf8_lossy(&chunk);
+            let lines: Vec<&str> = chunk_str.split('\n').collect();
+            for line in lines {
+                self._process_delta(line)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn _ask_openai(&mut self, api_key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let res = self
+            ._make_request(api_key)
             .await?
             .json::<Response>()
             .await?;
-
         for choice in res.choices.unwrap() {
             println!("{}: {}", choice.message.role, choice.message.content);
         }
@@ -176,9 +194,8 @@ fn primer() -> Message {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let matches = Command::new("howto-openai")
+fn clap_cli() -> clap::ArgMatches {
+    Command::new("howto-openai")
         .version("0.1.0")
         .author("0x434b <admin@0x434b.dev>")
         .about("Let openAI help you will simple howto tasks")
@@ -187,7 +204,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .short('m')
                 .long("model")
                 .help("The openAI model to use")
-                .default_value("gpt-3.5-turbo"),
+                .default_value(DEFAULT_MODEL),
         )
         .arg(
             arg!([TEMPERATURE])
@@ -195,7 +212,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .long("temperature")
                 .help("The temperature to use for the model. Higher values mean more random results. A value between 0.0 and 1.0!")
                 .value_parser(value_parser!(f64))
-                .default_value("0.7"),
+                .default_value(DEFAULT_TEMP),
         )
         .arg(
             arg!([MAX_TOKENS])
@@ -203,7 +220,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .long("max-tokens")
                 .help("The maximum number of tokens to generate. Between 1 and 2048")
                 .value_parser(value_parser!(u64).range(1..=2048))
-                .default_value("2048"),
+                .default_value(DEFAULT_MAX_TOKENS),
         )
         .arg(
             arg!([STREAM])
@@ -212,14 +229,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .help("Disable streaming the output from openAI.")
                 .required(false)
                 .action(ArgAction::SetFalse)
-                .default_value("true")
+                .default_value(DEFAULT_STREAM)
         )
         .arg(
             arg!([MESSAGE])
                 .action(ArgAction::Append)
                 .required(true),
         )
-        .get_matches();
+        .get_matches()
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let matches = clap_cli();
     let model = matches.get_one::<String>("MODEL").unwrap();
     let temperature = matches.get_one::<f64>("TEMPERATURE").unwrap().to_owned();
     let max_tokens = matches.get_one::<u64>("MAX_TOKENS").unwrap().to_owned();
@@ -227,7 +249,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut message: String = matches
         .get_many::<String>("MESSAGE")
         .unwrap_or_default()
-        .map(|s| s.as_str())
+        .map(std::string::String::as_str)
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -239,14 +261,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         message = format!("how to {}", message);
     }
 
-    let temperature = if !(&0.0..=&1.0).contains(&&temperature) {
-        1.0
-    } else {
+    let temperature = if (&0.0..=&1.0).contains(&&temperature) {
         temperature
+    } else {
+        1.0
     };
 
     Prompt::new(
-        model.to_owned(),
+        model.clone(),
         vec![
             primer(),
             Message {
