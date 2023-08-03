@@ -78,6 +78,9 @@ impl Prompt {
 
     fn _process_delta(&self, line: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
         line.strip_prefix("data: ").map_or(Ok(()), |chunk| {
+            if chunk.starts_with("[DONE]") {
+                return Ok(());
+            }
             let serde_chunk: Result<StreamedReponse, _> = serde_json::from_str(chunk);
             match serde_chunk {
                 Ok(chunk) => {
