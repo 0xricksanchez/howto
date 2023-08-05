@@ -1,5 +1,5 @@
+use aionic::openai::{Chat, OpenAIClient};
 use clap::{arg, value_parser, ArgAction, Command};
-use libai_rs::llm::openai::{OpenAIClient, DEFAULT_MODEL};
 use std::error::Error;
 
 fn primer() -> String {
@@ -18,7 +18,7 @@ fn clap_cli() -> clap::ArgMatches {
                 .short('m')
                 .long("model")
                 .help("The openAI model to use")
-                .default_value(DEFAULT_MODEL),
+                .default_value("gpt-3.5-turbo"),
         )
         .arg(
             arg!([TEMPERATURE])
@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         1.0
     };
 
-    OpenAIClient::new()
+    OpenAIClient::<Chat>::new()
         .set_model(model.clone())
         .set_temperature(temperature)
         .set_max_tokens(max_tokens)
