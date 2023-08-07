@@ -1,10 +1,12 @@
-use aionic::openai::{Chat, OpenAIClient};
+use aionic::openai::{Chat, OpenAI};
 use clap::{arg, value_parser, ArgAction, Command};
 use std::error::Error;
 
 fn primer() -> String {
     "You're a very smart life assisstant versatile in all possible things. 
-     Your task is to give me a very concise on point answer to the questions I'm about to ask you"
+     Your task is to give me a very concise on point answer to the questions I'm about to ask you.
+     In a lot of cases the questions will be technical in nature, and if they are assume that I'm a developer and
+     I'm asking you for help with a problem I'm having and how to solve it on the command-line on a UNIX system."
         .to_string()
 }
 
@@ -81,13 +83,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         1.0
     };
 
-    OpenAIClient::<Chat>::new()
+    OpenAI::<Chat>::new()
         .set_model(model.clone())
         .set_temperature(temperature)
         .set_max_tokens(max_tokens)
         .set_stream_responses(is_stream)
         .set_primer(primer())
-        .ask(message.clone())
+        .ask(message.clone(), false)
         .await?;
 
     Ok(())
